@@ -1,0 +1,304 @@
+
+import glob
+import pandas as pd
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from datetime import timedelta
+import seaborn as sns
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+import sklearn.metrics as metrics
+from collections import Counter
+
+path = r'/Users/Steven/COT_reports'
+filenames = glob.glob(path + "/*.xls")
+
+#Load in all COT reports since 2010 and concatenate into large dataframe
+dfs = []
+for filename in filenames:
+    dfs.append(pd.read_excel(filename))
+
+df = pd.concat(dfs, ignore_index=True)
+
+#Filter large dataframe for only 'Wheat' data
+df = df[df['Market_and_Exchange_Names'].str.contains("WHEAT", na=False)]
+
+#Load in Wheat Future price data since 2010
+df1 = pd.read_csv(r'/Users/Steven/US Wheat Futures Historical Data.csv')
+
+df1 = df1.sort_values(by='Date').reset_index(drop=True)
+
+def convert_dates(column):
+    
+    """ convert the df's date column into a datetime format 
+            for sorting and concatentation purposes"""
+    
+    column = column.apply(lambda x: pd.to_datetime(x).strftime('%m/%d/%Y'))
+    column = pd.to_datetime(column, format='%m/%d/%Y')
+    
+    return column
+    
+df['Report_Date_as_MM_DD_YYYY'] = convert_dates(df['Report_Date_as_MM_DD_YYYY'])  
+df1['Date'] = convert_dates(df1['Date'])
+
+#Sort both dfs by date   
+df1 = df1.sort_values(by='Date').reset_index(drop=True)
+df = df.sort_values(by='Report_Date_as_MM_DD_YYYY').reset_index(drop=True)
+
+df.rename(columns = {'Report_Date_as_MM_DD_YYYY':'Date'}, inplace = True)
+
+#Sum of all boards and insitution Wheat contracts into one respective object 
+df = df.groupby(['Date']).sum().reset_index()
+
+#Dates of COT reports are on Wednesday, for each commencing week 
+#Price data is Monday to Monday
+#I must therefore increase the price data, date, to Wednesdays to concat dfs 
+#and match the week prices with cot reports
+df1['Date'] = df1['Date'] + timedelta(days=2)
+
+#concat both dfs on date
+df_price = df.merge(df1, how='left', on='Date')
+
+#Shift the column of 'Price' up a row, this will show you the price increase/
+#decrease for the week i.e change 
+df_price['Post Week Price'] = df_price['Price'].shift(-1)
+df_price['Change'] = df_price['Post Week Price'] - df_price['Price']
+
+#remove all change values that are NaN
+#Removing is best practive as statistical fill would produce
+#innacurate results
+df_price = df_price[df_price['Change'].notna()]
+
+
+def positions_percentage(column1, column2, status='industry'):
+    
+        """ Calculates percentages long and short for each industry and
+        assigns that value to a column in our dataframe"""
+        
+        df_price[f'{status} Long %'] = (column1 /(column1 + column2)) * 100
+        df_price[f'{status} Short %'] = (column2 /(column1 + column2)) * 100
+        
+positions_percentage(df_price['Prod_Merc_Positions_Long_ALL'], 
+           df_price['Prod_Merc_Positions_Short_ALL'], status='Merc')
+
+positions_percentage(df_price['M_Money_Positions_Long_ALL'], 
+           df_price['M_Money_Positions_Short_ALL'], status='Managed')
+
+positions_percentage(df_price['Swap_Positions_Long_All'],
+                     df_price['Swap__Positions_Short_All'], status='Swap')
+
+def amount_position_change(column1, column2, status='industry'):
+    
+    """Calculate the change of weekly position in % terms for each
+        industry/institiuon"""
+    
+    df_price[f'{status} Long change'] = column1.shift(1) - column1
+    df_price[f'{status} Short change'] = column2.shift(1) - column2
+    df_price[f'{status} % Change Long'] = (((column1.shift(1) - column1)
+                                           / column1) * 100)
+    df_price[f'{status} % Change Short'] = (((column2.shift(1) - column2)
+                                           / column2) * 100)
+
+amount_position_change(df_price['Prod_Merc_Positions_Long_ALL'], 
+           df_price['Prod_Merc_Positions_Short_ALL'], status='Merc')
+
+amount_position_change(df_price['M_Money_Positions_Long_ALL'], 
+           df_price['M_Money_Positions_Short_ALL'], status='Managed')
+
+amount_position_change(df_price['Swap_Positions_Long_All'],
+                     df_price['Swap__Positions_Short_All'], status='Swap')
+
+def percentage_difference(column1, column2, status='industry'):
+    
+        """ Calculates the difference in % long and % short 
+        Positive values indicate a favour of long
+        Negative values indicate a favour of short"""
+        
+        df_price[f'{status} % position'] = column1 - column2
+        
+    
+percentage_difference(df_price['Merc Long %'],
+                     df_price['Merc Short %'], 
+                     status='Merc')
+
+percentage_difference(df_price['Managed Long %'], 
+                     df_price['Managed Short %'],
+                     status='Managed')
+
+percentage_difference(df_price['Swap Long %'],
+                     df_price['Swap Short %'],
+                     status='Swap')
+
+def change_in_price(column1, column2):
+    
+    """ Find the change in the percentage of the weekly prices"""
+        
+    df_price['Change in price %'] = (((column1 - column2) / column1))*100
+    
+change_in_price(df_price['Price'], df_price['Post Week Price'])
+
+def all_positions_long_short(column1, column2, column3, position='Long'):
+    
+    """ Calculate the sum positions, long and short, for all industries """
+    
+    df_price[f'All Positions {position}'] = column1 + column2 + column3
+
+all_positions_long_short(df_price['Prod_Merc_Positions_Long_ALL'],
+                         df_price['M_Money_Positions_Long_ALL'],
+                             df_price['Swap_Positions_Long_All'])
+
+all_positions_long_short(df_price['Prod_Merc_Positions_Short_ALL'], 
+                         df_price['M_Money_Positions_Short_ALL'],
+                             df_price['Swap__Positions_Short_All'], 
+                             position='Short')
+
+def percentage_tot_positions(column1, column2, position, status):
+    
+    """Calculates the % of the total sum of all contracts for each
+        insitution/industry"""
+    
+    df_price[f'{status} % of total {position}'] = (
+        (column1/(column1 + column2)) * 100)
+
+percentage_tot_positions(df_price['Prod_Merc_Positions_Long_ALL'],
+                      df_price['All Positions Long'], 'Long', 'Merc')
+percentage_tot_positions(df_price['M_Money_Positions_Long_ALL'],
+                      df_price['All Positions Long'], 'Long', 'Managed')
+percentage_tot_positions(df_price['Swap_Positions_Long_All'],
+                      df_price['All Positions Long'], 'Long', 'Swap')
+
+percentage_tot_positions(df_price['Prod_Merc_Positions_Short_ALL'],
+                      df_price['All Positions Short'], 'Short', 'Merc')
+percentage_tot_positions(df_price['M_Money_Positions_Short_ALL'],
+                      df_price['All Positions Short'], 'Short', 'Managed')
+percentage_tot_positions(df_price['Swap__Positions_Short_All'],
+                      df_price['All Positions Short'], 'Short', 'Swap')
+
+#Dummy change will calculate a dummy integer for increase, decrease
+#and no change in price. This may indicate if certain features can cause a 
+#a general movement in price, but may not correlate well to price change 
+#magnitude
+dummy_change = []
+for x in df_price['Change']:
+    if x > 0:
+        dummy_change.append(1)
+    elif x == 0:
+        dummy_change.append(0)
+    else:
+        dummy_change.append(-1)
+
+df_price['dummy change'] = dummy_change
+
+#Produce a dataframe showing the top correlations for each feature
+#in respect to change in price
+corr = df_price.corr()[['Change in price %']].sort_values(by='Change in price %',ascending=False)
+corr = corr[corr['Change in price %']>0.2]
+
+#Produce a dataframe showing the top correlations for each feature
+#in respect to Post Week Price
+corr1 = df_price.corr()[['Post Week Price']].sort_values(by='Post Week Price',ascending=False)
+corr1 = corr1[corr1['Post Week Price']>0.3]
+
+sns.scatterplot(data=df_price,x="Managed % position",y="Post Week Price")
+sns.scatterplot(data=df_price,x="Managed Long %",y="Post Week Price")
+#Interesting that the managed money positions have a large correlation
+#with Post Week Price 
+#from observation it may seem that managed money focus their position based 
+#on price levels
+#below 600 managed money are focussed short, with increasing shorts as the price 
+#lowers
+#above 600 managed money are foccused long, with increasing long positions
+#(in comparison to short positions) as the price increases
+
+#Shows a graph of instituions net positions against Wheat future prices
+X = df_price[['Date']]
+Y1=df_price[['Price']]
+Y2= df_price[['Merc % position']]
+Y3=df_price[['Managed % position']]
+
+fig, ax1 = plt.subplots(figsize=(10,6))
+ax2 = ax1.twinx()
+
+ax1.plot(X, Y1, color='red', linewidth=2) #plotting on primary Y-axis
+
+ax2.plot(X, Y2, color='green', linewidth=1, linestyle='--') #plotting on **second** Y-axis
+ax2.plot(X, Y3, color='blue', linewidth=1, linestyle='--') #plotting on **second** Y-axis
+#mManaged money net posiitons closely mirrors/shadows the price action
+
+#Show a years data for a closer look at how net positions follow price action
+start_date = '2020-01-01'
+df_price_year = df_price[df_price["Date"] >= start_date]
+   
+X = df_price_year[['Date']]
+Y1=df_price_year[['Price']]
+Y2= df_price_year[['Merc % position']]
+Y3=df_price_year[['Managed % position']]
+
+#Shows a graph of instituions net positions against Wheat future prices
+#for a year period
+fig2, ax3 = plt.subplots(figsize=(10,6))
+ax4 = ax3.twinx()
+
+ax3.plot(X, Y1, color='red', linewidth=2) #plotting on primary Y-axis
+ax3.scatter(X, Y1, color='red')
+
+ax4.plot(X, Y2, color='green', linewidth=1, linestyle='--') #plotting on **second** Y-axis
+ax4.plot(X, Y3, color='blue', linewidth=1, linestyle='--') #plotting on **second** Y-axis
+ax4.scatter(X, Y2, color='green')
+ax4.scatter(X, Y3, color='blue')
+
+#Great x (independant) and y (dependant) variables for LinearRegression Model
+X = df_price[['Price', 'Managed % position', 'Managed Long %', 
+              'Merc % of total Short', 'Merc Short %']]
+
+y = df_price[['Post Week Price']]
+
+#Split data for train and test purposes
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+LinReg = LinearRegression()
+
+LinReg.fit(X_train, y_train)
+
+predictions = LinReg.predict(X_test)
+
+#Scatter graph presenting true values vs predicted
+fig3, ax5 = plt.subplots()
+ax5.scatter(y_test, predictions)
+ax5.set_ylabel('Predicted')
+ax5.set_xlabel('Y test')
+
+#Shows regression evaluation metrics
+print('MAE: {}'.format(metrics.mean_absolute_error(y_test, predictions)))
+print('MSE: {}'.format(metrics.mean_squared_error(y_test, predictions)))
+print('RMSE: {}'.format(np.sqrt(metrics.mean_squared_error(y_test, predictions))))
+print('r2: {}'.format(metrics.r2_score(y_test, predictions)))
+
+#Graph showing distribution of residuals 
+fig4 = sns.displot((y_test-predictions))
+
+#Shows in a df how our predictions compared in relation to actual price movement
+y_test['Predictions'] = predictions
+y_test['Price'] = X_test['Price']
+y_test = y_test.reset_index(drop=True)
+
+#If price is predicted correctly a 1 is allocated
+#If incorrectly a 0 will be allocated
+#This will allow us to easily see when we are wrong and we the
+#model is correct, in terms of increase/decrease of price
+inc_dec = []
+for x,y in enumerate(y_test['Predictions']):
+    if y > y_test['Price'][x] and y_test['Post Week Price'][x] > y_test['Price'][x]:
+        inc_dec.append(1)
+    elif y < y_test['Price'][x] and y_test['Post Week Price'][x] < y_test['Price'][x]:
+        inc_dec.append(1)
+    else:
+        inc_dec.append(0)
+
+y_test['Inc/Dec'] = inc_dec
+        
+counter1 = Counter(y_test['Inc/Dec'])
+print(counter1)
+print("""Follwing only increase or decrease bias, in price, 
+      you can be 51% correct using this formula""")
